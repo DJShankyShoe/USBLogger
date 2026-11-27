@@ -1,0 +1,43 @@
+; Passive capture of a USB 1.1 D+/D- pair: both pins are inputs, always.
+; Never add `set pindirs`, `out pins`, `set pins` or a side-set: the tap must never drive the bus.
+; Each PIO clock samples {D-, D+}; autopush packs 16 samples per word, oldest in the low bits.
+; Samples: J (FS idle) = 1, K = 2, SE0 = 0, SE1 = 3, so a Full Speed idle word is 0x55555555.
+
+; The program: one instruction, two pins into the ISR on every PIO clock, forever.
+.program usb_tap_sample
+
+.wrap_target
+    in pins, 2
+.wrap
+
+% c-sdk {
+/* clock_get_hz, for the divider. */
+#include "hardware/clocks.h"
+
+/* Sets `sm` to sample D+ (dp_pin) and D- (dp_pin + 1) at `sample_hz`; returns the rate achieved. */
+static inline float usb_tap_sample_program_init(PIO pio, uint sm, uint offset,
+                                                uint dp_pin, float sample_hz)
+{
+    /* Plain inputs with no pulls, so the tap does not load the bus. */
+    pio_gpio_init(pio, dp_pin);
+    pio_gpio_init(pio, dp_pin + 1);
+    gpio_set_input_enabled(dp_pin, true);
+    gpio_set_input_enabled(dp_pin + 1, true);
+    gpio_disable_pulls(dp_pin);
+    gpio_disable_pulls(dp_pin + 1);
+    pio_sm_set_consecutive_pindirs(pio, sm, dp_pin, 2, false);
+
+    pio_sm_config c = usb_tap_sample_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, dp_pin);
+
+    /* Shift right, so the oldest sample is in the low bits; autopush every 16 samples. */
+    sm_config_set_in_shift(&c, true /* shift right */, true /* autopush */, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+
+    float div = (float)clock_get_hz(clk_sys) / sample_hz;
+    sm_config_set_clkdiv(&c, div);
+
+    pio_sm_init(pio, sm, offset, &c);
+    return (float)clock_get_hz(clk_sys) / div;
+}
+%}
